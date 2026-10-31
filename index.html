@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hộp Truyện – Đọc truyện tranh online</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head><body>
+<header class="top"><a class="logo" href="#/">HỘP TRUYỆN</a>
+<input id="q" type="search" placeholder="Tìm truyện theo tên hoặc tác giả" aria-label="Tìm truyện"></header>
+<main id="app"></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script>
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const css = u => (u||'').replace(/["')\\]/g, encodeURIComponent);
+const skel = () => `<div class="grid">${'<div class="comic sk"><div class="cv"></div><i></i></div>'.repeat(10)}</div>`;
+const err = e => app.innerHTML = `<div class="msg">Không tải được dữ liệu: ${esc(e.message)}. Kiểm tra config.js và đã chạy schema.sql / migration.sql chưa.</div>`;
+
+const SORTS = {new:'Mới cập nhật', top:'Xem nhiều', day:'Top ngày', week:'Top tuần', month:'Top tháng'};
+const DAYS = {day:1, week:7, month:30};
+const HEAD = {new:'Truyện mới cập nhật', top:'Xem nhiều nhất', day:'Xem nhiều hôm nay', week:'Xem nhiều tuần này', month:'Xem nhiều tháng này'};
+let sort = 'new'; try{ sort = localStorage.getItem('sort') || 'new'; }catch(e){} if(!SORTS[sort]) sort = 'new';
+const fmt = n => new Intl.NumberFormat('vi-VN',{notation:'compact',maximumFractionDigits:1}).format(n||0);
+
+async function home(term=''){
+  const bar = `<div class="sorts" role="tablist" aria-label="Sắp xếp">${Object.entries(SORTS).map(([k,v])=>
+    `<button class="chip" role="tab" aria-selected="${k===sort}" data-s="${k}">${v}</button>`).join('')}</div>`;
+  app.innerHTML = bar + skel();
+  app.querySelectorAll('.chip').forEach(b => b.onclick = () => { sort = b.dataset.s; try{localStorage.setItem('sort',sort)}catch(e){}
+    home(document.getElementById('q').value.trim()); });
+  let rows, error;
+  if(DAYS[sort]){
+    ({data:rows,error} = await sb.rpc('top_comics',{days:DAYS[sort],lim:60}));
+    if(rows && term){ const k = term.toLowerCase(); rows = rows.filter(c => (c.title+' '+(c.author||'')).toLowerCase().includes(k)); }
+  } else {
+    let q = sb.from('comics').select('id,title,slug,cover_url,author,status,views').limit(60).order(sort==='top'?'views':'updated_at',{ascending:false});
+    if(term){ const t = term.replace(/[%,()]/g,' '); q = q.or(`title.ilike.%${t}%,author.ilike.%${t}%`); }
+    ({data:rows,error} = await q);
+  }
+  if(error) return err(error);
+  const ranked = sort !== 'new' && !term;
+  app.innerHTML = bar +
+    `<h1>${term ? 'Kết quả cho “'+esc(term)+'”' : HEAD[sort]}</h1>` +
+    (rows.length ? `<div class="grid">${rows.map((c,i)=>`<a class="comic" href="#/c/${esc(c.slug)}">
+      <div class="cv" style="background-image:url('${css(c.cover_url)}')">${ranked?`<span class="rk r${i+1}">${i+1}</span>`:''}${sort!=='new'?`<span class="vw">${fmt(c.views)} lượt xem</span>`:''}</div>
+      <h3>${esc(c.title)}</h3><small class="${c.status==='completed'?'done':''}">${c.status==='completed'?'Hoàn thành':'Đang tiến hành'}</small></a>`).join('')}</div>`
+    : `<p class="empty">${term ? 'Không có truyện phù hợp.' : DAYS[sort] ? 'Chưa có lượt xem nào trong khoảng thời gian này.' : 'Chưa có truyện nào. Vào trang quản trị để thêm truyện đầu tiên.'}</p>`);
+  app.querySelectorAll('.chip').forEach(b => b.onclick = () => { sort = b.dataset.s; try{localStorage.setItem('sort',sort)}catch(e){}
+    home(document.getElementById('q').value.trim()); });
+}
+
+async function detail(slug){
+  app.innerHTML = skel();
+  const {data:c,error} = await sb.from('comics').select('*').eq('slug',slug).maybeSingle();
+  if(error) return err(error);
+  if(!c) return app.innerHTML = '<p class="empty">Không tìm thấy truyện này.</p>';
+  const {data:chs} = await sb.from('chapters').select('id,number,title,created_at').eq('comic_id',c.id).order('number',{ascending:false});
+  const vk = 'v:'+c.id; let seen = false; try{ seen = sessionStorage.getItem(vk); }catch(e){}
+  if(!seen){ sb.rpc('increment_views',{comic:c.id}).then(()=>{}); try{ sessionStorage.setItem(vk,'1'); }catch(e){} }
+  const first = chs?.length ? chs[chs.length-1] : null;
+  app.innerHTML = `<div class="detail" style="--bgc:url('${css(c.cover_url)}')"><div class="cv" style="background-image:url('${css(c.cover_url)}')"></div>
+    <div><h1>${esc(c.title)}</h1><p class="muted">${esc(c.author||'Đang cập nhật')} · ${c.status==='completed'?'Hoàn thành':'Đang tiến hành'} · ${(c.views+(seen?0:1)).toLocaleString('vi-VN')} lượt xem</p>
+    <p>${(c.genres||[]).map(g=>`<span class="tag">${esc(g)}</span>`).join('')}</p>
+    <p>${esc(c.description||'')}</p>
+    ${first?`<a class="btn" href="#/r/${first.id}">Đọc từ chương ${esc(first.number)}</a>`:''}</div></div>
+    <h2 style="margin-top:32px">Danh sách chương</h2>
+    <div class="chlist">${chs?.length ? chs.map(h=>`<a href="#/r/${h.id}"><span>Chương ${esc(h.number)}${h.title?': '+esc(h.title):''}</span><small>${new Date(h.created_at).toLocaleDateString('vi-VN')}</small></a>`).join('') : '<p class="empty">Chưa có chương nào.</p>'}</div>`;
+  document.title = c.title + ' – Hộp Truyện';
+}
+
+async function reader(id){
+  app.innerHTML = '<p class="empty">Đang tải…</p>';
+  const {data:h,error} = await sb.from('chapters').select('*, comics(title,slug)').eq('id',id).maybeSingle();
+  if(error) return err(error);
+  if(!h) return app.innerHTML = '<p class="empty">Không tìm thấy chương này.</p>';
+  const [{data:prev},{data:next}] = await Promise.all([
+    sb.from('chapters').select('id').eq('comic_id',h.comic_id).lt('number',h.number).order('number',{ascending:false}).limit(1),
+    sb.from('chapters').select('id').eq('comic_id',h.comic_id).gt('number',h.number).order('number').limit(1)]);
+  const nav = `<div class="bar">
+    ${prev?.[0]?`<a class="btn alt" href="#/r/${prev[0].id}">Chương trước</a>`:''}
+    <a class="btn alt" href="#/c/${esc(h.comics.slug)}">Mục lục</a>
+    ${next?.[0]?`<a class="btn" href="#/r/${next[0].id}">Chương sau</a>`:''}</div>`;
+  app.innerHTML = `<div class="reader"><h2 style="text-align:center">${esc(h.comics.title)} – Chương ${esc(h.number)}</h2>${nav}
+    ${h.pages.map((p,i)=>`<img src="${esc(p)}" alt="Trang ${i+1}" loading="lazy">`).join('')}${nav}</div>`;
+  window.scrollTo(0,0); document.title = `${h.comics.title} – Chương ${h.number}`;
+}
+
+function route(){
+  const [,k,v] = location.hash.split('/');
+  if(k==='c') detail(decodeURIComponent(v)); else if(k==='r') reader(v); else home();
+}
+addEventListener('hashchange', route); route();
+let t; document.getElementById('q').addEventListener('input', e => { clearTimeout(t);
+  t = setTimeout(()=>{ if(location.hash.length>2) location.hash='#/'; home(e.target.value.trim()); }, 300); });
+</script></body></html>
