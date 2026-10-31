@@ -87,6 +87,13 @@ async function reader(id){
     <button class="btn alt" type="button" data-toc aria-haspopup="dialog">${IC_LIST}<span>Chương</span></button>
     <button class="btn alt ic" type="button" data-refresh aria-label="Tải lại trang" title="Tải lại trang">${IC_REF}</button>
     ${next?`<a class="btn" href="#/r/${next.id}">Chương sau</a>`:''}</div>`;
+  const IC_PREV = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>';
+  const IC_NEXT = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
+  const dock = `<div class="dock" role="navigation" aria-label="Điều hướng chương">
+    ${prev?`<a class="d" href="#/r/${prev.id}" aria-label="Chương trước" title="Chương trước">${IC_PREV}</a>`:`<span class="d off" aria-hidden="true">${IC_PREV}</span>`}
+    <button class="d" type="button" data-toc aria-haspopup="dialog" aria-label="Danh sách chương" title="Danh sách chương">${IC_LIST}</button>
+    <button class="d" type="button" data-refresh aria-label="Tải lại trang" title="Tải lại trang">${IC_REF}</button>
+    ${next?`<a class="d go" href="#/r/${next.id}" aria-label="Chương sau" title="Chương sau">${IC_NEXT}</a>`:`<span class="d off" aria-hidden="true">${IC_NEXT}</span>`}</div>`;
   const sheet = `<div class="sheet" hidden>
     <div class="sheet-bg" data-close></div>
     <div class="sheet-box" role="dialog" aria-modal="true" aria-label="Danh sách chương">
@@ -95,7 +102,7 @@ async function reader(id){
       <a class="sheet-f" href="#/c/${esc(h.comics.slug)}">Về trang truyện</a>
     </div></div>`;
   app.innerHTML = `<div class="reader"><h2 style="text-align:center">${esc(h.comics.title)} – Chương ${esc(h.number)}</h2>${nav}
-    ${h.pages.map((p,i)=>`<img src="${esc(p)}" alt="Trang ${i+1}" loading="lazy">`).join('')}${nav}${sheet}</div>`;
+    ${h.pages.map((p,i)=>`<img src="${esc(p)}" alt="Trang ${i+1}" loading="lazy">`).join('')}${nav}${sheet}${dock}</div>`;
   const sh = app.querySelector('.sheet');
   const setSheet = open => { sh.hidden = !open; document.documentElement.classList.toggle('lock', open);
     if(open) sh.querySelector('.cur')?.scrollIntoView({block:'center'}); };
