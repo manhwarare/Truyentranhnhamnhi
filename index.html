@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Truyện Tranh Nhảm Nhí – Đọc truyện tranh online</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hộp Truyện – Đọc truyện tranh online</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head><body>
-<header class="top"><a class="logo" href="#/">TRUYỆN TRANH NHẢM NHÍ</a>
+<header class="top"><a class="logo" href="#/">HỘP TRUYỆN</a>
 <input id="q" type="search" placeholder="Tìm truyện theo tên hoặc tác giả" aria-label="Tìm truyện"></header>
 <main id="app"></main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
@@ -76,23 +76,42 @@ async function reader(id){
   const {data:h,error} = await sb.from('chapters').select('*, comics(title,slug)').eq('id',id).maybeSingle();
   if(error) return err(error);
   if(!h) return app.innerHTML = '<p class="empty">Không tìm thấy chương này.</p>';
-  const [{data:prev},{data:next}] = await Promise.all([
-    sb.from('chapters').select('id').eq('comic_id',h.comic_id).lt('number',h.number).order('number',{ascending:false}).limit(1),
-    sb.from('chapters').select('id').eq('comic_id',h.comic_id).gt('number',h.number).order('number').limit(1)]);
+  const {data:all} = await sb.from('chapters').select('id,number,title').eq('comic_id',h.comic_id).order('number',{ascending:false});
+  const list = all || [];
+  const idx = list.findIndex(x => String(x.id) === String(h.id));
+  const next = idx > 0 ? list[idx-1] : null, prev = idx >= 0 ? list[idx+1] : null;
+  const IC_LIST = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>';
+  const IC_REF = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>';
   const nav = `<div class="bar">
-    ${prev?.[0]?`<a class="btn alt" href="#/r/${prev[0].id}">Chương trước</a>`:''}
-    <a class="btn alt" href="#/c/${esc(h.comics.slug)}">Mục lục</a>
-    ${next?.[0]?`<a class="btn" href="#/r/${next[0].id}">Chương sau</a>`:''}</div>`;
+    ${prev?`<a class="btn alt" href="#/r/${prev.id}">Chương trước</a>`:''}
+    <button class="btn alt" type="button" data-toc aria-haspopup="dialog">${IC_LIST}<span>Chương</span></button>
+    <button class="btn alt ic" type="button" data-refresh aria-label="Tải lại trang" title="Tải lại trang">${IC_REF}</button>
+    ${next?`<a class="btn" href="#/r/${next.id}">Chương sau</a>`:''}</div>`;
+  const sheet = `<div class="sheet" hidden>
+    <div class="sheet-bg" data-close></div>
+    <div class="sheet-box" role="dialog" aria-modal="true" aria-label="Danh sách chương">
+      <div class="sheet-h"><strong>${esc(h.comics.title)}</strong><button type="button" class="x" data-close aria-label="Đóng">✕</button></div>
+      <div class="sheet-l">${list.map(x=>`<a href="#/r/${x.id}" class="${String(x.id)===String(h.id)?'cur':''}"${String(x.id)===String(h.id)?' aria-current="true"':''}>Chương ${esc(x.number)}${x.title?': '+esc(x.title):''}</a>`).join('')}</div>
+      <a class="sheet-f" href="#/c/${esc(h.comics.slug)}">Về trang truyện</a>
+    </div></div>`;
   app.innerHTML = `<div class="reader"><h2 style="text-align:center">${esc(h.comics.title)} – Chương ${esc(h.number)}</h2>${nav}
-    ${h.pages.map((p,i)=>`<img src="${esc(p)}" alt="Trang ${i+1}" loading="lazy">`).join('')}${nav}</div>`;
+    ${h.pages.map((p,i)=>`<img src="${esc(p)}" alt="Trang ${i+1}" loading="lazy">`).join('')}${nav}${sheet}</div>`;
+  const sh = app.querySelector('.sheet');
+  const setSheet = open => { sh.hidden = !open; document.documentElement.classList.toggle('lock', open);
+    if(open) sh.querySelector('.cur')?.scrollIntoView({block:'center'}); };
+  app.querySelectorAll('[data-toc]').forEach(b => b.onclick = () => setSheet(true));
+  app.querySelectorAll('[data-refresh]').forEach(b => b.onclick = () => location.reload());
+  sh.addEventListener('click', e => { if(e.target.closest('[data-close],a')) setSheet(false); });
   window.scrollTo(0,0); document.title = `${h.comics.title} – Chương ${h.number}`;
 }
 
 function route(){
+  document.documentElement.classList.remove('lock');
   const [,k,v] = location.hash.split('/');
   if(k==='c') detail(decodeURIComponent(v)); else if(k==='r') reader(v); else home();
 }
 addEventListener('hashchange', route); route();
+addEventListener('keydown', e => { if(e.key==='Escape'){ const s=document.querySelector('.sheet:not([hidden])'); if(s){ s.hidden=true; document.documentElement.classList.remove('lock'); } } });
 let t; document.getElementById('q').addEventListener('input', e => { clearTimeout(t);
   t = setTimeout(()=>{ if(location.hash.length>2) location.hash='#/'; home(e.target.value.trim()); }, 300); });
 </script></body></html>
