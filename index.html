@@ -5,6 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<style>html{scroll-behavior:auto}#app,.reader{overflow-anchor:none}</style>
 </head><body>
 <header class="top"><a class="logo" href="#/">HỘP TRUYỆN</a>
 <input id="q" type="search" placeholder="Tìm truyện theo tên hoặc tác giả" aria-label="Tìm truyện"></header>
@@ -14,6 +15,9 @@
 <script>
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.getElementById('app');
+try{ history.scrollRestoration = 'manual'; }catch(e){}
+const toTop = () => window.scrollTo({top:0,left:0,behavior:'instant'});
+let navId = 0;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const css = u => (u||'').replace(/["')\\]/g, encodeURIComponent);
 const skel = () => `<div class="grid">${'<div class="comic sk"><div class="cv"></div><i></i></div>'.repeat(10)}</div>`;
@@ -72,11 +76,14 @@ async function detail(slug){
 }
 
 async function reader(id){
+  const my = navId;
   app.innerHTML = '<p class="empty">Đang tải…</p>';
   const {data:h,error} = await sb.from('chapters').select('*, comics(title,slug)').eq('id',id).maybeSingle();
+  if(my !== navId) return;
   if(error) return err(error);
   if(!h) return app.innerHTML = '<p class="empty">Không tìm thấy chương này.</p>';
   const {data:all} = await sb.from('chapters').select('id,number,title').eq('comic_id',h.comic_id).order('number',{ascending:false});
+  if(my !== navId) return;
   const list = all || [];
   const idx = list.findIndex(x => String(x.id) === String(h.id));
   const next = idx > 0 ? list[idx-1] : null, prev = idx >= 0 ? list[idx+1] : null;
@@ -109,10 +116,12 @@ async function reader(id){
   app.querySelectorAll('[data-toc]').forEach(b => b.onclick = () => setSheet(true));
   app.querySelectorAll('[data-refresh]').forEach(b => b.onclick = () => location.reload());
   sh.addEventListener('click', e => { if(e.target.closest('[data-close],a')) setSheet(false); });
-  window.scrollTo(0,0); document.title = `${h.comics.title} – Chương ${h.number}`;
+  toTop(); requestAnimationFrame(toTop); setTimeout(toTop,120);
+  document.title = `${h.comics.title} – Chương ${h.number}`;
 }
 
 function route(){
+  navId++; toTop();
   document.documentElement.classList.remove('lock');
   const [,k,v] = location.hash.split('/');
   if(k==='c') detail(decodeURIComponent(v)); else if(k==='r') reader(v); else home();
