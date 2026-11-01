@@ -8,7 +8,9 @@
 <style>html{scroll-behavior:auto}#app,.reader{overflow-anchor:none}</style>
 </head><body>
 <header class="top"><a class="logo" href="#/">HỘP TRUYỆN</a>
-<input id="q" type="search" placeholder="Tìm truyện theo tên hoặc tác giả" aria-label="Tìm truyện"></header>
+<input id="q" type="search" placeholder="Tìm truyện theo tên hoặc tác giả" aria-label="Tìm truyện">
+<div id="acct"></div></header>
+<div id="toasts" aria-live="polite"></div>
 <main id="app"></main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="config.js"></script>
@@ -23,62 +25,297 @@ const css = u => (u||'').replace(/["')\\]/g, encodeURIComponent);
 const skel = () => `<div class="grid">${'<div class="comic sk"><div class="cv"></div><i></i></div>'.repeat(10)}</div>`;
 const err = e => app.innerHTML = `<div class="msg">Không tải được dữ liệu: ${esc(e.message)}. Kiểm tra config.js và đã chạy schema.sql / migration.sql chưa.</div>`;
 
-const SORTS = {new:'Mới cập nhật', top:'Xem nhiều', day:'Top ngày', week:'Top tuần', month:'Top tháng'};
+/* ============ tiện ích ============ */
+const $ = id => document.getElementById(id);
+const qv = () => $('q').value.trim();
+const LS = { get(k,d){ try{ const v = JSON.parse(localStorage.getItem(k)); return v ?? d; }catch(e){ return d; } },
+             set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} } };
+const toast = (m,bad) => { const d = document.createElement('div'); d.className = 'toast'+(bad?' bad':''); d.textContent = m; $('toasts').append(d); setTimeout(() => d.remove(), 3400); };
+const safeDec = s => { try{ return decodeURIComponent(s||''); }catch(e){ return s||''; } };
+const ago = d => { const s = (Date.now()-new Date(d))/1000;
+  if(s < 60) return 'vừa xong'; if(s < 3600) return Math.floor(s/60)+' phút trước'; if(s < 86400) return Math.floor(s/3600)+' giờ trước';
+  if(s < 2592000) return Math.floor(s/86400)+' ngày trước'; return new Date(d).toLocaleDateString('vi-VN'); };
+const viErr = m => { m = String(m||'');
+  if(/invalid login/i.test(m)) return 'Email hoặc mật khẩu không đúng.';
+  if(/already registered/i.test(m)) return 'Email này đã được đăng ký. Hãy đăng nhập.';
+  if(/not confirmed/i.test(m)) return 'Bạn cần xác nhận email trước khi đăng nhập.';
+  if(/at least \d+ char/i.test(m)) return 'Mật khẩu cần tối thiểu 6 ký tự.';
+  if(/different from the old|same.*password/i.test(m)) return 'Mật khẩu mới phải khác mật khẩu cũ.';
+  if(/rate limit|too many|after \d+ seconds/i.test(m)) return 'Thao tác quá nhanh, vui lòng thử lại sau ít phút.';
+  return m || 'Có lỗi xảy ra, thử lại sau.'; };
+
+/* ============ tài khoản ============ */
+let user = null;
+const userName = u => u?.user_metadata?.name || (u?.email||'').split('@')[0] || 'Bạn';
+
+function renderAcct(){
+  const el = $('acct');
+  if(user){ const nm = userName(user);
+    el.innerHTML = `<a class="acct" href="#/account" aria-label="Tài khoản của ${esc(nm)}"><span class="av" aria-hidden="true">${esc(nm.trim().charAt(0).toUpperCase())}</span><span class="nm">${esc(nm)}</span></a>`;
+  } else {
+    el.innerHTML = '<button class="btn sm acct-in" type="button">Đăng nhập</button>';
+    el.firstChild.onclick = () => authModal('login');
+  }
+}
+
+function closeModal(){ document.getElementById('authm')?.remove(); document.documentElement.classList.remove('lock'); }
+function authModal(mode='login', note=''){
+  closeModal();
+  const T = {login:'Đăng nhập', register:'Tạo tài khoản', forgot:'Quên mật khẩu', recover:'Đặt mật khẩu mới'};
+  const B = {login:'Đăng nhập', register:'Đăng ký', forgot:'Gửi link đặt lại', recover:'Lưu mật khẩu'};
+  const el = document.createElement('div'); el.className = 'modal'; el.id = 'authm';
+  el.innerHTML = `<div class="modal-bg" data-close></div>
+  <form class="card modal-box" role="dialog" aria-modal="true" aria-labelledby="amt">
+    <div class="sheet-h"><strong id="amt">${T[mode]}</strong><button type="button" class="x" data-close aria-label="Đóng">✕</button></div>
+    <p class="note" id="anote" ${note?'':'hidden'}>${esc(note)}</p>
+    ${mode==='register' ? '<label for="an">Tên hiển thị</label><input id="an" autocomplete="nickname" maxlength="40" placeholder="Không bắt buộc">' : ''}
+    ${mode!=='recover' ? '<label for="ae">Email</label><input id="ae" type="email" required autocomplete="email" inputmode="email">' : ''}
+    ${mode!=='forgot' ? `<label for="ap">${mode==='recover'?'Mật khẩu mới':'Mật khẩu'}</label><input id="ap" type="password" required minlength="6" autocomplete="${mode==='login'?'current-password':'new-password'}">` : ''}
+    <p class="err" id="aerr" role="alert" hidden></p>
+    <button class="btn" id="asub" style="width:100%;margin-top:18px">${B[mode]}</button>
+    <p class="alt-l">${mode==='login' ? '<a href="#" data-m="forgot">Quên mật khẩu?</a><a href="#" data-m="register">Tạo tài khoản mới</a>'
+      : mode==='recover' ? '' : '<a href="#" data-m="login">Đã có tài khoản? Đăng nhập</a>'}</p>
+  </form>`;
+  document.body.append(el); document.documentElement.classList.add('lock');
+  el.querySelector('input')?.focus();
+  el.addEventListener('click', e => {
+    if(e.target.closest('[data-close]')) return closeModal();
+    const a = e.target.closest('[data-m]'); if(a){ e.preventDefault(); authModal(a.dataset.m); }
+  });
+  const showErr = m => { const x = $('aerr'); x.textContent = m; x.hidden = !m; };
+  const base = location.href.split('#')[0];
+  el.querySelector('form').onsubmit = async e => {
+    e.preventDefault(); showErr(''); const btn = $('asub'); btn.disabled = true;
+    const email = $('ae')?.value.trim(), pw = $('ap')?.value;
+    try{
+      if(mode==='login'){
+        const {error} = await sb.auth.signInWithPassword({email, password:pw}); if(error) throw error;
+        closeModal(); toast('Đã đăng nhập');
+      } else if(mode==='register'){
+        const name = $('an').value.trim();
+        const {data,error} = await sb.auth.signUp({email, password:pw, options:{data:name?{name}:{}, emailRedirectTo:base}}); if(error) throw error;
+        if(data.user && data.user.identities && !data.user.identities.length) throw new Error('User already registered');
+        if(data.session){ closeModal(); toast('Đã tạo tài khoản'); }
+        else { const n = $('anote'); n.textContent = `Đã gửi email xác nhận tới ${email}. Bấm vào link trong email, rồi quay lại đăng nhập.`; n.hidden = false; btn.hidden = true; }
+      } else if(mode==='forgot'){
+        const {error} = await sb.auth.resetPasswordForEmail(email, {redirectTo:base}); if(error) throw error;
+        const n = $('anote'); n.textContent = `Nếu ${email} đã đăng ký, bạn sẽ nhận được email đặt lại mật khẩu trong ít phút.`; n.hidden = false; btn.hidden = true;
+      } else {
+        const {error} = await sb.auth.updateUser({password:pw}); if(error) throw error;
+        closeModal(); toast('Đã đổi mật khẩu');
+      }
+    }catch(x){ showErr(viErr(x.message)); }
+    finally{ btn.disabled = false; }
+  };
+}
+
+/* ============ dữ liệu đọc: đã đăng nhập → Supabase, khách → localStorage ============ */
+const COMIC_COLS = 'title,slug,cover_url,author,status,genres';
+
+async function getProgress(){
+  if(user){
+    const {data} = await sb.from('reading_progress').select(`comic_id,chapter_id,chapter_number,updated_at,comics(${COMIC_COLS})`).order('updated_at',{ascending:false}).limit(200);
+    return (data||[]).filter(x => x.comics);
+  }
+  return Object.values(LS.get('hp_prog',{})).sort((a,b) => new Date(b.updated_at)-new Date(a.updated_at));
+}
+async function getProgFor(comicId){
+  if(user){ const {data} = await sb.from('reading_progress').select('chapter_id,chapter_number,updated_at').eq('comic_id',comicId).maybeSingle(); return data; }
+  return LS.get('hp_prog',{})[comicId] || null;
+}
+async function getReadSet(comicId){
+  if(user){ const {data} = await sb.from('read_chapters').select('chapter_id').eq('comic_id',comicId); return new Set((data||[]).map(r => String(r.chapter_id))); }
+  return new Set((LS.get('hp_read',{})[comicId]||[]).map(String));
+}
+async function markRead(h){
+  const now = new Date().toISOString(), cm = h.comics || {};
+  if(user){
+    const [a,b] = await Promise.all([
+      sb.from('reading_progress').upsert({user_id:user.id, comic_id:h.comic_id, chapter_id:h.id, chapter_number:h.number, updated_at:now}, {onConflict:'user_id,comic_id'}),
+      sb.from('read_chapters').upsert({user_id:user.id, chapter_id:h.id, comic_id:h.comic_id, read_at:now}, {onConflict:'user_id,chapter_id'})]);
+    if(a.error || b.error) console.warn('Không lưu được tiến độ:', (a.error||b.error).message);
+  } else {
+    const p = LS.get('hp_prog',{});
+    p[h.comic_id] = {comic_id:h.comic_id, chapter_id:h.id, chapter_number:h.number, updated_at:now,
+      comics:{title:cm.title, slug:cm.slug, cover_url:cm.cover_url, author:cm.author, status:cm.status, genres:cm.genres||[]}};
+    LS.set('hp_prog',p);
+    const r = LS.get('hp_read',{}), a = r[h.comic_id] || [];
+    if(!a.includes(h.id)) a.push(h.id); r[h.comic_id] = a; LS.set('hp_read',r);
+  }
+}
+async function clearProg(comicId){
+  if(user){ await Promise.all([sb.from('reading_progress').delete().eq('comic_id',comicId), sb.from('read_chapters').delete().eq('comic_id',comicId)]); }
+  else { const p = LS.get('hp_prog',{}); delete p[comicId]; LS.set('hp_prog',p); const r = LS.get('hp_read',{}); delete r[comicId]; LS.set('hp_read',r); }
+}
+async function syncLocal(){ // gộp tiến độ đọc khi còn là khách vào tài khoản vừa đăng nhập
+  const p = Object.values(LS.get('hp_prog',{})), r = LS.get('hp_read',{});
+  const reads = Object.entries(r).flatMap(([cid,ids]) => ids.map(id => ({user_id:user.id, comic_id:cid, chapter_id:id})));
+  if(!p.length && !reads.length) return;
+  const {data:ex} = await sb.from('reading_progress').select('comic_id,updated_at');
+  const have = new Map((ex||[]).map(x => [x.comic_id, new Date(x.updated_at)]));
+  const rows = p.filter(x => !have.has(x.comic_id) || new Date(x.updated_at) > have.get(x.comic_id))
+    .map(x => ({user_id:user.id, comic_id:x.comic_id, chapter_id:x.chapter_id, chapter_number:x.chapter_number, updated_at:x.updated_at}));
+  let bad = false;
+  if(rows.length){ const {error} = await sb.from('reading_progress').upsert(rows, {onConflict:'user_id,comic_id'}); bad = bad || !!error; }
+  if(reads.length){ const {error} = await sb.from('read_chapters').upsert(reads, {onConflict:'user_id,chapter_id', ignoreDuplicates:true}); bad = bad || !!error; }
+  if(!bad){ try{ localStorage.removeItem('hp_prog'); localStorage.removeItem('hp_read'); }catch(e){} }
+}
+async function getFollows(){
+  if(!user) return [];
+  const {data} = await sb.from('follows').select(`comic_id,created_at,comics(id,views,${COMIC_COLS})`).order('created_at',{ascending:false});
+  return (data||[]).filter(x => x.comics);
+}
+async function isFollowing(comicId){
+  if(!user) return false;
+  const {data} = await sb.from('follows').select('comic_id').eq('comic_id',comicId).maybeSingle(); return !!data;
+}
+
+/* ============ trang chủ ============ */
+const SORTS = {new:'Mới cập nhật', hot:'Hot', top:'Xem nhiều', day:'Top ngày', week:'Top tuần', month:'Top tháng', follow:'Theo dõi', read:'Đã đọc'};
 const DAYS = {day:1, week:7, month:30};
-const HEAD = {new:'Truyện mới cập nhật', top:'Xem nhiều nhất', day:'Xem nhiều hôm nay', week:'Xem nhiều tuần này', month:'Xem nhiều tháng này'};
-let sort = 'new'; try{ sort = localStorage.getItem('sort') || 'new'; }catch(e){} if(!SORTS[sort]) sort = 'new';
+const HEAD = {new:'Truyện mới cập nhật', hot:'Truyện đang hot', top:'Xem nhiều nhất', day:'Xem nhiều hôm nay', week:'Xem nhiều tuần này', month:'Xem nhiều tháng này', follow:'Truyện đang theo dõi', read:'Truyện đã đọc'};
+const STATUS = {'':'Tất cả', ongoing:'Đang tiến hành', completed:'Hoàn thành'};
+const RANKED = ['hot','top','day','week','month'];
+let sort = LS.get('hp_sort','new'); if(!SORTS[sort]) sort = 'new';
+let status = '', genre = '', genreCache = [], homeSeq = 0;
 const fmt = n => new Intl.NumberFormat('vi-VN',{notation:'compact',maximumFractionDigits:1}).format(n||0);
 
+function bars(){
+  return `<div class="sorts" role="tablist" aria-label="Sắp xếp">${Object.entries(SORTS).map(([k,v]) =>
+      `<button class="chip" role="tab" aria-selected="${k===sort}" data-s="${k}">${k==='hot'?'🔥 ':''}${v}</button>`).join('')}</div>
+    <div class="sorts sm" role="group" aria-label="Trạng thái">${Object.entries(STATUS).map(([k,v]) =>
+      `<button class="chip" aria-pressed="${k===status}" data-st="${k}">${v}</button>`).join('')}</div>
+    <div class="sorts sm" role="group" aria-label="Thể loại"><button class="chip" aria-pressed="${!genre}" data-g="">Tất cả thể loại</button>${genreCache.map(([g,n]) =>
+      `<button class="chip" aria-pressed="${g===genre}" data-g="${esc(g)}">${esc(g)} <small>${n}</small></button>`).join('')}</div>`;
+}
+function bindBars(){
+  app.querySelectorAll('.chip[data-s]').forEach(b => b.onclick = () => { sort = b.dataset.s; LS.set('hp_sort',sort); home(qv()); });
+  app.querySelectorAll('.chip[data-st]').forEach(b => b.onclick = () => { status = b.dataset.st; home(qv()); });
+  app.querySelectorAll('.chip[data-g]').forEach(b => b.onclick = () => { const g = b.dataset.g; location.hash = g ? '#/g/'+encodeURIComponent(g) : '#/'; });
+}
+
+async function fetchList(term, progP){
+  const g = genre || null, st = status || null;
+  const cf = rows => rows.filter(c => (!genre || (c.genres||[]).includes(genre)) && (!status || c.status === status) &&
+    (!term || (c.title+' '+(c.author||'')).toLowerCase().includes(term.toLowerCase())));
+  if(sort === 'follow'){ if(!user) return {gate:'follow'}; return {rows: cf((await getFollows()).map(x => x.comics))}; }
+  if(sort === 'read'){ return {rows: cf((await progP).map(x => ({...x.comics, id:x.comic_id})))}; }
+  if(sort === 'hot'){ const {data,error} = await sb.rpc('hot_comics',{lim:60, p_genre:g, p_status:st}); return {rows: data && cf(data), error}; }
+  if(DAYS[sort]){ const {data,error} = await sb.rpc('top_comics',{days:DAYS[sort], lim:60, p_genre:g, p_status:st}); return {rows: data && cf(data), error}; }
+  let q = sb.from('comics').select('id,title,slug,cover_url,author,status,views,genres').limit(60).order(sort==='top'?'views':'updated_at',{ascending:false});
+  if(genre) q = q.contains('genres','{"'+genre.replace(/(["\\])/g,'\\$1')+'"}');
+  if(status) q = q.eq('status',status);
+  if(term){ const t = term.replace(/[%,()]/g,' '); q = q.or(`title.ilike.%${t}%,author.ilike.%${t}%`); }
+  const {data,error} = await q; return {rows:data, error};
+}
+
 async function home(term=''){
-  const bar = `<div class="sorts" role="tablist" aria-label="Sắp xếp">${Object.entries(SORTS).map(([k,v])=>
-    `<button class="chip" role="tab" aria-selected="${k===sort}" data-s="${k}">${v}</button>`).join('')}</div>`;
-  app.innerHTML = bar + skel();
-  app.querySelectorAll('.chip').forEach(b => b.onclick = () => { sort = b.dataset.s; try{localStorage.setItem('sort',sort)}catch(e){}
-    home(document.getElementById('q').value.trim()); });
-  let rows, error;
-  if(DAYS[sort]){
-    ({data:rows,error} = await sb.rpc('top_comics',{days:DAYS[sort],lim:60}));
-    if(rows && term){ const k = term.toLowerCase(); rows = rows.filter(c => (c.title+' '+(c.author||'')).toLowerCase().includes(k)); }
+  const my = ++homeSeq, nid = navId;
+  app.innerHTML = bars() + skel(); bindBars();
+  const progP = getProgress();
+  const [prog, res, gr] = await Promise.all([progP, fetchList(term, progP), sb.from('comics').select('genres')]);
+  if(my !== homeSeq || nid !== navId) return;
+  const cnt = {}; (gr.data||[]).forEach(x => (x.genres||[]).forEach(g => { g = String(g).trim(); if(g) cnt[g] = (cnt[g]||0)+1; }));
+  if(genre && !cnt[genre]) cnt[genre] = 0;
+  genreCache = Object.entries(cnt).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0],'vi')).slice(0,40);
+  if(res.error) return err(res.error);
+  const progMap = new Map(prog.map(p => [p.comic_id, p]));
+  const ranked = RANKED.includes(sort) && !term, showViews = RANKED.includes(sort);
+  const rows = res.rows || [];
+  const filtered = genre || status;
+
+  const cont = (prog.length && !term && sort !== 'read') ? `<section class="cont" aria-label="Tiếp tục đọc"><div class="sec-h"><h2>Tiếp tục đọc</h2><a class="more" href="#/account">Lịch sử đọc</a></div>
+    <div class="cards">${prog.slice(0,10).map(p => `<a class="cc" href="#/r/${esc(p.chapter_id)}"><div class="cv" style="background-image:url('${css(p.comics.cover_url)}')"></div>
+      <div class="ci"><b>${esc(p.comics.title)}</b><small>Chương ${esc(p.chapter_number)} · ${ago(p.updated_at)}</small><span class="go">Đọc tiếp →</span></div></a>`).join('')}</div></section>` : '';
+
+  let body;
+  if(res.gate){
+    body = `<div class="msg">Đăng nhập để theo dõi truyện yêu thích và xem lại ở mọi thiết bị.<br><button class="btn sm" id="gate" type="button" style="margin-top:14px">Đăng nhập</button></div>`;
+  } else if(rows.length){
+    body = `<div class="grid">${rows.map((c,i) => { const p = progMap.get(c.id);
+      return `<a class="comic" href="#/c/${esc(c.slug)}"><div class="cv" style="background-image:url('${css(c.cover_url)}')">${ranked?`<span class="rk r${i+1}">${i+1}</span>`:''}${showViews?`<span class="vw">${fmt(c.views)} lượt xem</span>`:''}${p?'<span class="pg">Đã đọc</span>':''}</div>
+        <h3>${esc(c.title)}</h3><small class="${c.status==='completed'?'done':''}">${c.status==='completed'?'Hoàn thành':'Đang tiến hành'}</small>${p?`<em class="rd">Đọc đến chương ${esc(p.chapter_number)}</em>`:''}</a>`; }).join('')}</div>`;
   } else {
-    let q = sb.from('comics').select('id,title,slug,cover_url,author,status,views').limit(60).order(sort==='top'?'views':'updated_at',{ascending:false});
-    if(term){ const t = term.replace(/[%,()]/g,' '); q = q.or(`title.ilike.%${t}%,author.ilike.%${t}%`); }
-    ({data:rows,error} = await q);
+    body = `<p class="empty">${term ? 'Không có truyện phù hợp.' : filtered ? 'Chưa có truyện nào khớp bộ lọc này.' :
+      sort==='follow' ? 'Bạn chưa theo dõi truyện nào. Mở một truyện và bấm “Theo dõi”.' : sort==='read' ? 'Bạn chưa đọc truyện nào.' :
+      (DAYS[sort] || sort==='hot') ? 'Chưa có lượt xem nào trong khoảng thời gian này.' : 'Chưa có truyện nào. Vào trang quản trị để thêm truyện đầu tiên.'}</p>`;
   }
-  if(error) return err(error);
-  const ranked = sort !== 'new' && !term;
-  app.innerHTML = bar +
-    `<h1>${term ? 'Kết quả cho “'+esc(term)+'”' : HEAD[sort]}</h1>` +
-    (rows.length ? `<div class="grid">${rows.map((c,i)=>`<a class="comic" href="#/c/${esc(c.slug)}">
-      <div class="cv" style="background-image:url('${css(c.cover_url)}')">${ranked?`<span class="rk r${i+1}">${i+1}</span>`:''}${sort!=='new'?`<span class="vw">${fmt(c.views)} lượt xem</span>`:''}</div>
-      <h3>${esc(c.title)}</h3><small class="${c.status==='completed'?'done':''}">${c.status==='completed'?'Hoàn thành':'Đang tiến hành'}</small></a>`).join('')}</div>`
-    : `<p class="empty">${term ? 'Không có truyện phù hợp.' : DAYS[sort] ? 'Chưa có lượt xem nào trong khoảng thời gian này.' : 'Chưa có truyện nào. Vào trang quản trị để thêm truyện đầu tiên.'}</p>`);
-  app.querySelectorAll('.chip').forEach(b => b.onclick = () => { sort = b.dataset.s; try{localStorage.setItem('sort',sort)}catch(e){}
-    home(document.getElementById('q').value.trim()); });
+  const title = term ? 'Kết quả cho “'+esc(term)+'”' : (genre ? esc(genre)+' · ' : '') + HEAD[sort];
+  app.innerHTML = cont + bars() + `<h1>${title}</h1>` + body;
+  bindBars(); $('gate')?.addEventListener('click', () => authModal('login','Đăng nhập để theo dõi truyện.'));
 }
 
 async function detail(slug){
+  const my = navId;
   app.innerHTML = skel();
   const {data:c,error} = await sb.from('comics').select('*').eq('slug',slug).maybeSingle();
+  if(my !== navId) return;
   if(error) return err(error);
   if(!c) return app.innerHTML = '<p class="empty">Không tìm thấy truyện này.</p>';
-  const {data:chs} = await sb.from('chapters').select('id,number,title,created_at').eq('comic_id',c.id).order('number',{ascending:false});
+  const [chRes, prog, readSet, followed] = await Promise.all([
+    sb.from('chapters').select('id,number,title,created_at').eq('comic_id',c.id).order('number',{ascending:false}),
+    getProgFor(c.id), getReadSet(c.id), isFollowing(c.id)]);
+  if(my !== navId) return;
+  const chs = chRes.data || [];
   const vk = 'v:'+c.id; let seen = false; try{ seen = sessionStorage.getItem(vk); }catch(e){}
   if(!seen){ sb.rpc('increment_views',{comic:c.id}).then(()=>{}); try{ sessionStorage.setItem(vk,'1'); }catch(e){} }
-  const first = chs?.length ? chs[chs.length-1] : null;
+  const first = chs.length ? chs[chs.length-1] : null;
+  const cur = prog ? chs.find(x => String(x.id) === String(prog.chapter_id)) : null;
+  let fol = followed;
   app.innerHTML = `<div class="detail" style="--bgc:url('${css(c.cover_url)}')"><div class="cv" style="background-image:url('${css(c.cover_url)}')"></div>
     <div><h1>${esc(c.title)}</h1><p class="muted">${esc(c.author||'Đang cập nhật')} · ${c.status==='completed'?'Hoàn thành':'Đang tiến hành'} · ${(c.views+(seen?0:1)).toLocaleString('vi-VN')} lượt xem</p>
-    <p>${(c.genres||[]).map(g=>`<span class="tag">${esc(g)}</span>`).join('')}</p>
+    <p>${(c.genres||[]).map(g=>`<a class="tag" href="#/g/${encodeURIComponent(g)}">${esc(g)}</a>`).join('')}</p>
     <p>${esc(c.description||'')}</p>
-    ${first?`<a class="btn" href="#/r/${first.id}">Đọc từ chương ${esc(first.number)}</a>`:''}</div></div>
+    <div class="acts">${cur ? `<a class="btn" href="#/r/${cur.id}">Đọc tiếp · Chương ${esc(cur.number)}</a>${first && first.id!==cur.id ? `<a class="btn alt" href="#/r/${first.id}">Đọc từ đầu</a>` : ''}`
+      : first ? `<a class="btn" href="#/r/${first.id}">Đọc từ chương ${esc(first.number)}</a>` : ''}
+      <button class="btn alt" id="fol" type="button" aria-pressed="${fol}">${fol?'Đang theo dõi ✓':'+ Theo dõi'}</button></div></div></div>
     <h2 style="margin-top:32px">Danh sách chương</h2>
-    <div class="chlist">${chs?.length ? chs.map(h=>`<a href="#/r/${h.id}"><span>Chương ${esc(h.number)}${h.title?': '+esc(h.title):''}</span><small>${new Date(h.created_at).toLocaleDateString('vi-VN')}</small></a>`).join('') : '<p class="empty">Chưa có chương nào.</p>'}</div>`;
+    <div class="chlist">${chs.length ? chs.map(h => { const rd = readSet.has(String(h.id)), cu = cur && String(cur.id) === String(h.id);
+      return `<a href="#/r/${h.id}" class="${rd?'read':''}${cu?' cur':''}"><span>${rd?'<i class="ck" aria-hidden="true">✓</i><span class="sr">Đã đọc. </span>':''}Chương ${esc(h.number)}${h.title?': '+esc(h.title):''}</span><small>${cu?'Đang đọc':new Date(h.created_at).toLocaleDateString('vi-VN')}</small></a>`; }).join('') : '<p class="empty">Chưa có chương nào.</p>'}</div>`;
   document.title = c.title + ' – Hộp Truyện';
+  const fb = $('fol');
+  fb.onclick = async () => {
+    if(!user) return authModal('login','Đăng nhập để theo dõi truyện và xem lại ở mọi thiết bị.');
+    fb.disabled = true;
+    const {error} = fol ? await sb.from('follows').delete().eq('comic_id',c.id)
+                        : await sb.from('follows').insert({user_id:user.id, comic_id:c.id});
+    if(error) toast('Không thực hiện được: '+error.message, 1);
+    else { fol = !fol; fb.textContent = fol ? 'Đang theo dõi ✓' : '+ Theo dõi'; fb.setAttribute('aria-pressed',fol); toast(fol?'Đã thêm vào danh sách theo dõi':'Đã bỏ theo dõi'); }
+    fb.disabled = false;
+  };
+}
+
+async function account(){
+  const my = navId;
+  app.innerHTML = skel();
+  const [prog, fol] = await Promise.all([getProgress(), getFollows()]);
+  if(my !== navId) return;
+  const head = user ? `<div class="card"><h2>Tài khoản</h2><p class="muted">${esc(user.email)}</p>
+      <label for="nm">Tên hiển thị</label><div class="inl"><input id="nm" value="${esc(user.user_metadata?.name||'')}" maxlength="40" placeholder="${esc(userName(user))}"><button class="btn sm" id="svn" type="button">Lưu</button></div>
+      <label for="np">Đổi mật khẩu</label><div class="inl"><input id="np" type="password" minlength="6" autocomplete="new-password" placeholder="Mật khẩu mới (tối thiểu 6 ký tự)"><button class="btn sm" id="svp" type="button">Đổi</button></div>
+      <p style="margin-top:20px"><button class="btn sm alt" id="out" type="button">Đăng xuất</button></p></div>`
+    : `<div class="card"><h2>Bạn chưa đăng nhập</h2><p class="muted">Tiến độ đọc đang lưu tạm trên trình duyệt này. Đăng nhập để giữ lại và đọc tiếp trên mọi thiết bị.</p>
+      <p style="margin-top:16px"><button class="btn sm" id="li" type="button">Đăng nhập</button> <button class="btn sm alt" id="rg" type="button">Tạo tài khoản</button></p></div>`;
+  const hist = prog.length ? `<div class="hist">${prog.map(p => `<div class="hrow"><a class="hc" href="#/c/${esc(p.comics.slug)}"><span class="cv" style="background-image:url('${css(p.comics.cover_url)}')"></span>
+      <span><b>${esc(p.comics.title)}</b><small>Đọc đến chương ${esc(p.chapter_number)} · ${ago(p.updated_at)}</small></span></a>
+      <span class="ha"><a class="btn sm" href="#/r/${esc(p.chapter_id)}">Đọc tiếp</a><button class="btn sm alt" type="button" data-rm="${esc(p.comic_id)}" aria-label="Xoá ${esc(p.comics.title)} khỏi lịch sử">Xoá</button></span></div>`).join('')}</div>`
+    : '<p class="empty">Chưa có lịch sử đọc.</p>';
+  const fl = user ? `<h2 style="margin:32px 0 16px">Đang theo dõi</h2>` + (fol.length ? `<div class="grid">${fol.map(x => `<a class="comic" href="#/c/${esc(x.comics.slug)}"><div class="cv" style="background-image:url('${css(x.comics.cover_url)}')"></div>
+      <h3>${esc(x.comics.title)}</h3><small class="${x.comics.status==='completed'?'done':''}">${x.comics.status==='completed'?'Hoàn thành':'Đang tiến hành'}</small></a>`).join('')}</div>` : '<p class="empty">Chưa theo dõi truyện nào.</p>') : '';
+  app.innerHTML = `<h1>${user ? 'Xin chào, '+esc(userName(user)) : 'Lịch sử đọc'}</h1>${head}<h2 style="margin-bottom:16px">Lịch sử đọc</h2>${hist}${fl}`;
+  document.title = 'Tài khoản – Hộp Truyện';
+  $('li')?.addEventListener('click', () => authModal('login')); $('rg')?.addEventListener('click', () => authModal('register'));
+  $('out')?.addEventListener('click', async () => { await sb.auth.signOut(); toast('Đã đăng xuất'); });
+  $('svn')?.addEventListener('click', async () => { const {error} = await sb.auth.updateUser({data:{name:$('nm').value.trim()}}); error ? toast(viErr(error.message),1) : (renderAcct(), toast('Đã lưu tên hiển thị')); });
+  $('svp')?.addEventListener('click', async () => { const v = $('np').value; if(v.length < 6) return toast('Mật khẩu cần tối thiểu 6 ký tự.',1);
+    const {error} = await sb.auth.updateUser({password:v}); error ? toast(viErr(error.message),1) : ($('np').value = '', toast('Đã đổi mật khẩu')); });
+  app.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await clearProg(b.dataset.rm); b.closest('.hrow').remove(); });
 }
 
 async function reader(id){
   const my = navId;
   app.innerHTML = '<p class="empty">Đang tải…</p>';
-  const {data:h,error} = await sb.from('chapters').select('*, comics(title,slug)').eq('id',id).maybeSingle();
+  const {data:h,error} = await sb.from('chapters').select('*, comics(title,slug,cover_url,author,status,genres)').eq('id',id).maybeSingle();
   if(my !== navId) return;
   if(error) return err(error);
   if(!h) return app.innerHTML = '<p class="empty">Không tìm thấy chương này.</p>';
@@ -118,16 +355,37 @@ async function reader(id){
   sh.addEventListener('click', e => { if(e.target.closest('[data-close],a')) setSheet(false); });
   toTop(); requestAnimationFrame(toTop); setTimeout(toTop,120);
   document.title = `${h.comics.title} – Chương ${h.number}`;
+  const rid = navId; setTimeout(() => { if(rid === navId) markRead(h); }, 2000);
 }
 
 function route(){
   navId++; toTop();
   document.documentElement.classList.remove('lock');
   const [,k,v] = location.hash.split('/');
-  if(k==='c') detail(decodeURIComponent(v)); else if(k==='r') reader(v); else home();
+  genre = k === 'g' ? safeDec(v) : '';
+  if(k !== 'c' && k !== 'r') document.title = k === 'account' ? 'Tài khoản – Hộp Truyện' : 'Hộp Truyện – Đọc truyện tranh online';
+  if(k==='c') detail(safeDec(v)); else if(k==='r') reader(v); else if(k==='account') account(); else home(qv());
 }
-addEventListener('hashchange', route); route();
-addEventListener('keydown', e => { if(e.key==='Escape'){ const s=document.querySelector('.sheet:not([hidden])'); if(s){ s.hidden=true; document.documentElement.classList.remove('lock'); } } });
-let t; document.getElementById('q').addEventListener('input', e => { clearTimeout(t);
-  t = setTimeout(()=>{ if(location.hash.length>2) location.hash='#/'; home(e.target.value.trim()); }, 300); });
+addEventListener('hashchange', route);
+addEventListener('keydown', e => { if(e.key==='Escape'){ if($('authm')) return closeModal();
+  const s=document.querySelector('.sheet:not([hidden])'); if(s){ s.hidden=true; document.documentElement.classList.remove('lock'); } } });
+let t; $('q').addEventListener('input', e => { clearTimeout(t);
+  t = setTimeout(() => { const [,k,v] = location.hash.split('/'); if(k && k !== 'g'){ location.hash = '#/'; } else home(e.target.value.trim()); }, 300); });
+
+/* khởi động: lấy phiên đăng nhập trước khi vẽ trang để tránh nhấp nháy */
+(async () => {
+  try{ const {data} = await sb.auth.getSession(); user = data.session?.user || null; }catch(e){}
+  renderAcct(); route();
+  sb.auth.onAuthStateChange((ev, session) => {
+    const prev = user?.id || null; user = session?.user || null; const now = user?.id || null;
+    renderAcct();
+    setTimeout(async () => {   // tránh gọi Supabase ngay trong callback
+      if(ev === 'PASSWORD_RECOVERY') return authModal('recover','Nhập mật khẩu mới cho tài khoản của bạn.');
+      if(prev !== now){
+        if(now) await syncLocal();
+        if(!/^#\/r\//.test(location.hash)) route();
+      }
+    }, 0);
+  });
+})();
 </script></body></html>
