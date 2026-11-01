@@ -5,101 +5,223 @@
 <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head><body>
-<header class="top"><a class="logo" href="admin.html">QUẢN TRỊ</a><a href="index.html" style="margin-left:auto">Xem trang đọc truyện</a>
+<header class="top"><a class="logo" href="admin.html">QUẢN TRỊ</a><a class="lnk" href="index.html" target="_blank">Xem trang đọc truyện ↗</a>
 <button id="out" class="btn sm alt" hidden>Đăng xuất</button></header>
-<main id="app"></main>
+<div id="toasts" aria-live="polite"></div><main id="app"></main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="config.js"></script>
 <script>
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-const app = document.getElementById('app');
+const $ = id => document.getElementById(id), app = $('app');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const slugify = t => t.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-const note = (m,bad) => { const d=document.createElement('div'); d.className='msg'; d.textContent=m; if(bad) d.style.background='var(--red)', d.style.color='#fff'; app.prepend(d); setTimeout(()=>d.remove(),4000); };
+const safeName = n => n.replace(/[^a-zA-Z0-9._-]/g,'_');
+const fmt = n => new Intl.NumberFormat('vi-VN').format(n||0);
+const day = d => new Date(d).toLocaleDateString('vi-VN');
+const natural = (a,b) => a.name.localeCompare(b.name,undefined,{numeric:true});
+const toast = (m,bad) => { const d=document.createElement('div'); d.className='toast'+(bad?' bad':''); d.textContent=m; $('toasts').append(d); setTimeout(()=>d.remove(),3600); };
+const pathOf = u => { const m=/\/object\/public\/comics\/(.+)$/.exec(u||''); return m?decodeURIComponent(m[1]):null; };
+async function rmFiles(urls){ const p=urls.map(pathOf).filter(Boolean); try{ for(let i=0;i<p.length;i+=100) await sb.storage.from('comics').remove(p.slice(i,i+100)); }catch(e){} }
 async function upload(file, path){
-  const {error} = await sb.storage.from('comics').upload(path, file, {upsert:true, contentType:file.type});
+  const {error} = await sb.storage.from('comics').upload(path, file, {upsert:true, contentType:file.type, cacheControl:'31536000'});
   if(error) throw error; return sb.storage.from('comics').getPublicUrl(path).data.publicUrl;
 }
-const safeName = n => n.replace(/[^a-zA-Z0-9._-]/g,'_');
+async function shrink(f){ // nén ảnh sang WebP, tối đa 1600px chiều rộng
+  if(!/^image\/(jpeg|png|webp)$/.test(f.type) || f.size < 250e3) return f;
+  try{ const b = await createImageBitmap(f), r = Math.min(1,1600/b.width), c = document.createElement('canvas');
+    c.width = Math.round(b.width*r); c.height = Math.round(b.height*r); c.getContext('2d').drawImage(b,0,0,c.width,c.height);
+    const blob = await new Promise(o=>c.toBlob(o,'image/webp',.85));
+    if(blob && blob.size < f.size) return new File([blob], f.name.replace(/\.\w+$/,'')+'.webp', {type:'image/webp'});
+  }catch(e){} return f;
+}
+async function pool(list, fn, n=4){ let i=0; await Promise.all(Array.from({length:Math.min(n,list.length)}, async()=>{ while(i<list.length){ const k=i++; await fn(list[k],k); } })); }
+function dropzone(z, inp, cb){
+  ['dragenter','dragover'].forEach(e=>z.addEventListener(e,x=>{x.preventDefault(); z.classList.add('on');}));
+  ['dragleave','drop'].forEach(e=>z.addEventListener(e,x=>{x.preventDefault(); z.classList.remove('on');}));
+  z.addEventListener('drop',x=>cb([...x.dataTransfer.files].filter(f=>f.type.startsWith('image/'))));
+  inp.onchange = () => { cb([...inp.files]); inp.value=''; };
+}
+function pageGrid(el, items){ // lưới trang: kéo để đổi thứ tự, ✕ để bỏ
+  let from = null;
+  const draw = () => {
+    el.innerHTML = items.map((it,i)=>`<figure draggable="true" data-i="${i}"><img src="${esc(it.src)}" alt="" loading="lazy"><b>${i+1}</b><button type="button" class="x" data-x="${i}" aria-label="Bỏ trang ${i+1}">✕</button></figure>`).join('');
+    el.querySelectorAll('[data-x]').forEach(b=>b.onclick=()=>{ const it=items.splice(+b.dataset.x,1)[0]; if(it.file) URL.revokeObjectURL(it.src); draw(); });
+    el.querySelectorAll('figure').forEach(f=>{
+      f.ondragstart = e => { from=+f.dataset.i; e.dataTransfer.effectAllowed='move'; f.classList.add('drag'); };
+      f.ondragend = () => { from=null; f.classList.remove('drag'); };
+      f.ondragover = e => { if(from!==null) e.preventDefault(); };
+      f.ondrop = e => { e.preventDefault(); const to=+f.dataset.i; if(from===null||from===to) return; items.splice(to,0,items.splice(from,1)[0]); from=null; draw(); };
+    });
+  };
+  draw();
+  return { add(files){ files.sort(natural).forEach(file=>items.push({file, src:URL.createObjectURL(file)})); draw(); } };
+}
+async function savePages(items, comicId, num, prog, zip){
+  const todo = items.filter(i=>i.file); let done = 0;
+  await pool(todo, async it => { const f = zip ? await shrink(it.file) : it.file;
+    it.url = await upload(f, `${comicId}/${num}/${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}-${safeName(f.name)}`);
+    prog(++done, todo.length); });
+  return items.map(i=>i.url);
+}
+const progUI = () => (d,t) => { $('pbw').hidden=false; $('pb').style.width=(d/t*100)+'%'; $('prog').textContent=`Đang tải ${d}/${t} ảnh…`; };
+const pageBlock = (label) => `<label>${label}</label>
+  <label class="dz" id="dz"><input id="p" type="file" accept="image/*" multiple hidden><span><b>Kéo thả ảnh vào đây</b> hoặc bấm để chọn nhiều ảnh. Tự sắp xếp theo tên file, có thể kéo để đổi thứ tự.</span></label>
+  <div class="pgrid" id="pg"></div>
+  <label class="chk"><input type="checkbox" id="zip" checked> Nén ảnh sang WebP (tải nhanh hơn, tiết kiệm dung lượng)</label>
+  <div class="pbar" id="pbw" hidden><i id="pb"></i></div>`;
 
+/* ---------- đăng nhập ---------- */
 async function boot(){
   const {data:{session}} = await sb.auth.getSession();
   if(!session) return login();
   const {data:ad} = await sb.from('admins').select('user_id').eq('user_id',session.user.id).maybeSingle();
-  if(!ad){ app.innerHTML='<div class="card"><h2>Chưa có quyền quản trị</h2><p>Tài khoản này chưa nằm trong bảng admins. Xem hướng dẫn cuối file schema.sql.</p></div>'; out.hidden=false; return; }
-  out.hidden=false; listComics();
+  if(!ad){ app.innerHTML='<div class="card"><h2>Chưa có quyền quản trị</h2><p>Tài khoản này chưa nằm trong bảng admins. Xem hướng dẫn cuối file schema.sql.</p></div>'; $('out').hidden=false; return; }
+  $('out').hidden=false; listComics();
 }
-out.onclick = async()=>{ await sb.auth.signOut(); out.hidden=true; login(); };
-
+$('out').onclick = async()=>{ await sb.auth.signOut(); $('out').hidden=true; login(); };
 function login(){
   app.innerHTML = `<form class="card" id="f" style="max-width:420px;margin:40px auto"><h2>Đăng nhập quản trị</h2>
     <label for="em">Email</label><input id="em" type="email" required autocomplete="username">
     <label for="pw">Mật khẩu</label><input id="pw" type="password" required autocomplete="current-password">
     <p><button class="btn">Đăng nhập</button></p></form>`;
-  f.onsubmit = async e => { e.preventDefault();
-    const {error} = await sb.auth.signInWithPassword({email:em.value,password:pw.value});
-    error ? note('Đăng nhập thất bại: '+error.message,1) : boot(); };
+  $('f').onsubmit = async e => { e.preventDefault();
+    const {error} = await sb.auth.signInWithPassword({email:$('em').value,password:$('pw').value});
+    error ? toast('Đăng nhập thất bại: '+error.message,1) : boot(); };
 }
 
+/* ---------- danh sách truyện ---------- */
 async function listComics(){
-  const {data,error} = await sb.from('comics').select('id,title,status,views').order('created_at',{ascending:false});
-  if(error) return note(error.message,1);
-  app.innerHTML = `<div class="row" style="border:0;padding:0 0 12px"><h1>Quản lý truyện</h1><button class="btn" id="add">Thêm truyện mới</button></div>
-    <div class="chlist" style="max-height:none">${data.length?data.map(c=>`<div class="row"><span><b>${esc(c.title)}</b> <small class="muted">${c.views} lượt xem</small></span>
-    <span><button class="btn sm alt" data-ch="${c.id}">Chương</button> <button class="btn sm alt" data-ed="${c.id}">Sửa</button> <button class="btn sm del" data-del="${c.id}">Xoá</button></span></div>`).join(''):'<p class="empty">Chưa có truyện nào. Bấm “Thêm truyện mới” để bắt đầu.</p>'}</div>`;
-  add.onclick = ()=>comicForm();
-  app.querySelectorAll('[data-ed]').forEach(b=>b.onclick=()=>comicForm(b.dataset.ed));
-  app.querySelectorAll('[data-ch]').forEach(b=>b.onclick=()=>chapters(b.dataset.ch));
-  app.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('Xoá truyện này cùng toàn bộ chương?')) return;
-    const {error}=await sb.from('comics').delete().eq('id',b.dataset.del); error?note(error.message,1):listComics(); });
+  app.innerHTML = '<p class="empty">Đang tải…</p>';
+  const {data,error} = await sb.from('comics').select('*, chapters(count)').order('created_at',{ascending:false});
+  if(error) return toast(error.message,1);
+  const rows = data.map(c=>({...c, n:c.chapters?.[0]?.count||0}));
+  const sum = (f) => rows.reduce((s,c)=>s+f(c),0);
+  app.innerHTML = `<div class="head"><h1>Quản lý truyện</h1><button class="btn" id="add">+ Thêm truyện</button></div>
+    <div class="stats"><div><b>${rows.length}</b><span>Truyện</span></div><div><b>${fmt(sum(c=>c.n))}</b><span>Chương</span></div>
+    <div><b>${fmt(sum(c=>+c.views||0))}</b><span>Lượt xem</span></div><div><b>${rows.filter(c=>c.status==='completed').length}</b><span>Hoàn thành</span></div></div>
+    <div class="tools"><input id="qs" type="search" placeholder="Tìm theo tên hoặc tác giả"><select id="so" aria-label="Sắp xếp">
+    <option value="new">Mới cập nhật</option><option value="views">Xem nhiều</option><option value="chap">Nhiều chương</option><option value="title">Tên A–Z</option></select></div>
+    <div class="alist" id="lst"></div>`;
+  const draw = () => {
+    const k = $('qs').value.trim().toLowerCase(), so = $('so').value;
+    const r = rows.filter(c=>(c.title+' '+(c.author||'')).toLowerCase().includes(k)).sort((a,b)=>
+      so==='views' ? b.views-a.views : so==='chap' ? b.n-a.n : so==='title' ? a.title.localeCompare(b.title,'vi') :
+      new Date(b.updated_at||b.created_at)-new Date(a.updated_at||a.created_at));
+    $('lst').innerHTML = r.length ? r.map(c=>`<div class="arow"><img class="th" src="${esc(c.cover_url||'')}" alt="" loading="lazy">
+      <div class="inf"><b>${esc(c.title)}</b><small>${esc(c.author||'Chưa rõ tác giả')} · ${c.n} chương · ${fmt(c.views)} lượt xem</small>
+      <span class="st ${c.status}">${c.status==='completed'?'Hoàn thành':'Đang tiến hành'}</span></div>
+      <div class="acts"><button class="btn sm" data-ch="${c.id}">Chương</button><button class="btn sm alt" data-ed="${c.id}">Sửa</button>
+      <a class="btn sm alt" target="_blank" href="index.html#/c/${esc(c.slug)}">Xem</a><button class="btn sm del" data-del="${c.id}">Xoá</button></div></div>`).join('')
+      : '<p class="empty">Không có truyện nào phù hợp.</p>';
+    app.querySelectorAll('[data-ed]').forEach(b=>b.onclick=()=>comicForm(b.dataset.ed));
+    app.querySelectorAll('[data-ch]').forEach(b=>b.onclick=()=>chapters(b.dataset.ch));
+    app.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
+      const c = rows.find(x=>x.id===b.dataset.del);
+      if(!confirm(`Xoá “${c.title}” cùng ${c.n} chương và toàn bộ ảnh? Không thể khôi phục.`)) return;
+      const {data:chs} = await sb.from('chapters').select('pages').eq('comic_id',c.id);
+      const {error} = await sb.from('comics').delete().eq('id',c.id);
+      if(error) return toast(error.message,1);
+      await rmFiles([c.cover_url, ...(chs||[]).flatMap(h=>h.pages)]); toast('Đã xoá truyện'); listComics(); });
+  };
+  $('qs').oninput = draw; $('so').onchange = draw; $('add').onclick = () => comicForm(); draw();
 }
 
+/* ---------- thêm / sửa truyện ---------- */
+const GENRES = ['Hành động','Phiêu lưu','Hài hước','Tình cảm','Kinh dị','Viễn tưởng','Học đường','Cổ trang','Trinh thám','Đời thường'];
 async function comicForm(id){
-  const c = id ? (await sb.from('comics').select('*').eq('id',id).single()).data : {genres:[],status:'ongoing'};
-  app.innerHTML = `<form class="card" id="f"><h2>${id?'Sửa truyện':'Thêm truyện mới'}</h2><div class="form2">
-    <div><label for="t">Tên truyện</label><input id="t" required value="${esc(c.title)}"></div>
-    <div><label for="a">Tác giả</label><input id="a" value="${esc(c.author)}"></div>
-    <div><label for="s">Trạng thái</label><select id="s"><option value="ongoing">Đang tiến hành</option><option value="completed">Hoàn thành</option></select></div>
-    <div><label for="g">Thể loại (cách nhau bằng dấu phẩy)</label><input id="g" value="${esc((c.genres||[]).join(', '))}"></div></div>
-    <label for="d">Mô tả</label><textarea id="d" rows="4">${esc(c.description)}</textarea>
-    <label for="cv">Ảnh bìa ${c.cover_url?'(để trống nếu giữ ảnh cũ)':''}</label><input id="cv" type="file" accept="image/*">
-    <p><button class="btn">Lưu truyện</button> <button type="button" class="btn alt" id="back">Huỷ</button></p></form>`;
-  s.value = c.status; back.onclick = listComics;
-  f.onsubmit = async e => { e.preventDefault(); const btn=f.querySelector('.btn'); btn.disabled=true;
+  const [{data:one},{data:all}] = await Promise.all([ id ? sb.from('comics').select('*').eq('id',id).single() : {data:null}, sb.from('comics').select('genres') ]);
+  const c = one || {genres:[],status:'ongoing'};
+  const sug = [...new Set([...(all||[]).flatMap(x=>x.genres||[]), ...GENRES])];
+  let file = null;
+  app.innerHTML = `<form class="card" id="f"><h2>${id?'Sửa truyện':'Thêm truyện mới'}</h2>
+    <div class="split"><div><label>Ảnh bìa</label><label class="dz cover" id="dz"><input id="cv" type="file" accept="image/*" hidden>
+      <img id="cvp" alt="" ${c.cover_url?`src="${esc(c.cover_url)}"`:'hidden'}><span ${c.cover_url?'hidden':''}>Kéo thả hoặc bấm để chọn ảnh bìa</span></label></div>
+    <div><div class="form2"><div><label for="t">Tên truyện</label><input id="t" required value="${esc(c.title)}"></div>
+      <div><label for="a">Tác giả</label><input id="a" value="${esc(c.author)}"></div>
+      <div><label for="s">Trạng thái</label><select id="s"><option value="ongoing">Đang tiến hành</option><option value="completed">Hoàn thành</option></select></div>
+      <div><label for="g">Thể loại</label><input id="g" value="${esc((c.genres||[]).join(', '))}" placeholder="Cách nhau bằng dấu phẩy"></div></div>
+      <div class="chips" id="sg">${sug.map(x=>`<button type="button" class="chip">${esc(x)}</button>`).join('')}</div>
+      <label for="d">Mô tả</label><textarea id="d" rows="5">${esc(c.description)}</textarea>
+      ${id?`<p class="muted" style="margin-top:10px;font-size:13px">Đường dẫn: #/c/${esc(c.slug)} · ${fmt(c.views)} lượt xem</p>`:''}</div></div>
+    <p style="margin-top:18px"><button class="btn" id="go">Lưu truyện</button> <button type="button" class="btn alt" id="back">Huỷ</button></p></form>`;
+  $('s').value = c.status; $('back').onclick = listComics;
+  const genres = () => $('g').value.split(',').map(x=>x.trim()).filter(Boolean);
+  const mark = () => { const g = genres().map(x=>x.toLowerCase()); $('sg').querySelectorAll('.chip').forEach(b=>b.classList.toggle('on',g.includes(b.textContent.toLowerCase()))); };
+  $('sg').querySelectorAll('.chip').forEach(b=>b.onclick=()=>{ const g=genres(), i=g.findIndex(x=>x.toLowerCase()===b.textContent.toLowerCase());
+    i<0 ? g.push(b.textContent) : g.splice(i,1); $('g').value=g.join(', '); mark(); });
+  $('g').oninput = mark; mark();
+  dropzone($('dz'), $('cv'), fs => { if(!fs[0]) return; file=fs[0]; $('cvp').src=URL.createObjectURL(file); $('cvp').hidden=false; $('dz').querySelector('span').hidden=true; });
+  $('f').onsubmit = async e => { e.preventDefault(); $('go').disabled=true; $('go').textContent='Đang lưu…';
     try{
-      const row = {title:t.value.trim(), author:a.value.trim()||null, status:s.value, description:d.value.trim()||null,
-        genres:g.value.split(',').map(x=>x.trim()).filter(Boolean)};
+      const row = {title:$('t').value.trim(), author:$('a').value.trim()||null, status:$('s').value, description:$('d').value.trim()||null, genres:genres()};
       if(!id) row.slug = slugify(row.title)+'-'+Date.now().toString(36).slice(-4);
-      if(cv.files[0]) row.cover_url = await upload(cv.files[0], `covers/${Date.now()}-${safeName(cv.files[0].name)}`);
+      if(file){ const f = await shrink(file); row.cover_url = await upload(f, `covers/${Date.now()}-${safeName(f.name)}`); }
       const {error} = id ? await sb.from('comics').update(row).eq('id',id) : await sb.from('comics').insert(row);
-      if(error) throw error; listComics();
-    }catch(x){ note('Lỗi: '+x.message,1); btn.disabled=false; } };
+      if(error) throw error;
+      if(file && c.cover_url) rmFiles([c.cover_url]);
+      toast(id?'Đã lưu thay đổi':'Đã thêm truyện'); listComics();
+    }catch(x){ toast('Lỗi: '+x.message,1); $('go').disabled=false; $('go').textContent='Lưu truyện'; } };
 }
 
-async function chapters(comicId){
-  const [{data:c},{data:chs}] = await Promise.all([
-    sb.from('comics').select('title').eq('id',comicId).single(),
-    sb.from('chapters').select('id,number,title,pages').eq('comic_id',comicId).order('number',{ascending:false})]);
-  app.innerHTML = `<button class="btn alt sm" id="back">Quay lại danh sách truyện</button><h1 style="margin:16px 0">${esc(c.title)}</h1>
-    <form class="card" id="f"><h2>Thêm chương</h2><div class="form2">
-    <div><label for="n">Số chương</label><input id="n" type="number" step="0.1" required></div>
+/* ---------- chương ---------- */
+async function chapters(cid){
+  const [{data:c},{data:chs,error}] = await Promise.all([
+    sb.from('comics').select('title,slug').eq('id',cid).single(),
+    sb.from('chapters').select('id,number,title,pages,created_at').eq('comic_id',cid).order('number',{ascending:false})]);
+  if(error) return toast(error.message,1);
+  const next = chs.length ? Math.floor(+chs[0].number)+1 : 1, items = [];
+  app.innerHTML = `<div class="head"><div><button class="btn alt sm" id="back">← Danh sách truyện</button><h1 style="margin-top:14px">${esc(c.title)}</h1></div>
+    <a class="btn alt sm" target="_blank" href="index.html#/c/${esc(c.slug)}">Xem trên web ↗</a></div>
+    <form class="card" id="f"><h2>Thêm chương mới</h2><div class="form2">
+    <div><label for="n">Số chương</label><input id="n" type="number" step="1" min="1" inputmode="numeric" required value="${next}"></div>
     <div><label for="t">Tên chương (không bắt buộc)</label><input id="t"></div></div>
-    <label for="p">Ảnh các trang (chọn nhiều ảnh, sắp xếp theo tên file)</label><input id="p" type="file" accept="image/*" multiple required>
-    <p><button class="btn">Đăng chương</button> <span id="prog" class="muted"></span></p></form>
-    <div class="chlist" style="max-height:none">${chs.length?chs.map(h=>`<div class="row"><span>Chương ${esc(h.number)}${h.title?': '+esc(h.title):''} <small class="muted">${h.pages.length} trang</small></span>
-    <button class="btn sm del" data-del="${h.id}">Xoá</button></div>`).join(''):'<p class="empty">Truyện này chưa có chương.</p>'}</div>`;
-  back.onclick = listComics;
-  app.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{ if(!confirm('Xoá chương này?')) return;
-    const {error}=await sb.from('chapters').delete().eq('id',b.dataset.del); error?note(error.message,1):chapters(comicId); });
-  f.onsubmit = async e => { e.preventDefault(); const btn=f.querySelector('.btn'); btn.disabled=true;
+    ${pageBlock('Ảnh các trang')}
+    <p><button class="btn" id="go">Đăng chương</button> <span id="prog" class="muted"></span></p></form>
+    <h2 style="margin-bottom:12px">Danh sách chương (${chs.length})</h2>
+    <div class="alist">${chs.length ? chs.map(h=>`<div class="arow"><div class="inf"><b>Chương ${esc(h.number)}${h.title?': '+esc(h.title):''}</b>
+      <small>${h.pages.length} trang · ${day(h.created_at)}</small></div>
+      <div class="acts"><button class="btn sm alt" data-ed="${h.id}">Sửa</button><button class="btn sm del" data-del="${h.id}">Xoá</button></div></div>`).join('')
+      : '<p class="empty">Truyện này chưa có chương.</p>'}</div>`;
+  $('back').onclick = listComics;
+  const g = pageGrid($('pg'), items); dropzone($('dz'), $('p'), fs => g.add(fs));
+  app.querySelectorAll('[data-ed]').forEach(b=>b.onclick=()=>chapterEdit(b.dataset.ed,cid));
+  app.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
+    const h = chs.find(x=>x.id===b.dataset.del);
+    if(!confirm(`Xoá chương ${h.number} (${h.pages.length} trang)?`)) return;
+    const {error} = await sb.from('chapters').delete().eq('id',h.id);
+    if(error) return toast(error.message,1); rmFiles(h.pages); toast('Đã xoá chương'); chapters(cid); });
+  $('f').onsubmit = async e => { e.preventDefault();
+    if(!items.length) return toast('Hãy chọn ít nhất 1 ảnh',1);
+    $('go').disabled = true;
     try{
-      const files = [...p.files].sort((x,y)=>x.name.localeCompare(y.name,undefined,{numeric:true})), urls=[];
-      for(const [i,file] of files.entries()){ prog.textContent=`Đang tải ${i+1}/${files.length}…`;
-        urls.push(await upload(file, `${comicId}/${n.value}/${String(i).padStart(3,'0')}-${safeName(file.name)}`)); }
-      const {error} = await sb.from('chapters').insert({comic_id:comicId, number:+n.value, title:t.value.trim()||null, pages:urls});
-      if(error) throw error; chapters(comicId);
-    }catch(x){ note('Lỗi: '+x.message,1); btn.disabled=false; prog.textContent=''; } };
+      const pages = await savePages(items, cid, parseInt($('n').value,10), progUI(), $('zip').checked);
+      const {error} = await sb.from('chapters').insert({comic_id:cid, number:parseInt($('n').value,10), title:$('t').value.trim()||null, pages});
+      if(error) throw error; toast('Đã đăng chương '+$('n').value); chapters(cid);
+    }catch(x){ rmFiles(items.filter(i=>i.file&&i.url).map(i=>i.url));
+      toast(x.code==='23505' ? 'Số chương này đã tồn tại' : 'Lỗi: '+x.message, 1); $('go').disabled=false; $('prog').textContent=''; } };
+}
+
+async function chapterEdit(hid, cid){
+  const {data:h,error} = await sb.from('chapters').select('*').eq('id',hid).single();
+  if(error) return toast(error.message,1);
+  const items = h.pages.map(u=>({url:u, src:u}));
+  app.innerHTML = `<button class="btn alt sm" id="back">← Về danh sách chương</button><form class="card" id="f" style="margin-top:16px"><h2>Sửa chương ${esc(h.number)}</h2>
+    <div class="form2"><div><label for="n">Số chương</label><input id="n" type="number" step="1" min="1" inputmode="numeric" required value="${esc(h.number)}"></div>
+    <div><label for="t">Tên chương</label><input id="t" value="${esc(h.title)}"></div></div>
+    ${pageBlock('Các trang (kéo để đổi thứ tự, ✕ để bỏ, thả thêm ảnh để bổ sung)')}
+    <p><button class="btn" id="go">Lưu chương</button> <span id="prog" class="muted"></span></p></form>`;
+  $('back').onclick = () => chapters(cid);
+  const g = pageGrid($('pg'), items); dropzone($('dz'), $('p'), fs => g.add(fs));
+  $('f').onsubmit = async e => { e.preventDefault();
+    if(!items.length) return toast('Chương cần ít nhất 1 trang',1);
+    $('go').disabled = true;
+    try{
+      const pages = await savePages(items, cid, parseInt($('n').value,10), progUI(), $('zip').checked);
+      const {error} = await sb.from('chapters').update({number:parseInt($('n').value,10), title:$('t').value.trim()||null, pages}).eq('id',hid);
+      if(error) throw error; rmFiles(h.pages.filter(u=>!pages.includes(u)));
+      toast('Đã lưu chương'); chapters(cid);
+    }catch(x){ rmFiles(items.filter(i=>i.file&&i.url).map(i=>i.url));
+      toast(x.code==='23505' ? 'Số chương này đã tồn tại' : 'Lỗi: '+x.message, 1); $('go').disabled=false; $('prog').textContent=''; } };
 }
 boot();
 </script></body></html>
